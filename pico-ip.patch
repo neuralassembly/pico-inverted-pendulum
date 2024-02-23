@@ -1,0 +1,1187 @@
+--- KalmanAngle/Inclinometer.cpp.orig	2024-02-23 17:02:43.387855722 +0900
++++ KalmanAngle/Inclinometer.cpp	2024-02-23 17:04:51.054455429 +0900
+@@ -1,21 +1,20 @@
+ //=========================================================
+ //Inclinometer
+-//MPU board:  NUCLEO-F401RE
++//MPU board:  Raspberry Pi Pico
+ //Accelerometer + Gyro sensor: BMX055
+ //2019/03/01  N. Beppu
++//2024/02/23  T. Kanamaru
+ //=========================================================
+-#include "mbed.h"
+-#include "math.h"
++#include <stdio.h>
++#include <math.h>
++#include "pico/stdlib.h"
++#include "hardware/i2c.h"
+ 
+ //=========================================================
+-//Port Setting
+-DigitalOut led1(LED1);          //LED on the NUCLEO board
+-I2C i2c(PB_9, PB_8);            //Gyro + Accelerometer (SDA, SCLK)
+-Serial uart_usb(USBTX, USBRX); //UART (over USB)
+-
+-//=========================================================
+-//Ticker
+-Ticker timer1;
++//I2C addresses
++const uint address_bmx055_acc = 0x19;
++const uint address_bmx055_gyro = 0x69;
++const uint register_bmx055 = 0x02;
+ 
+ //=========================================================
+ //Accelerometer and gyro statistical data
+@@ -31,8 +30,8 @@
+ //Kalman filter (for angle estimation) variables
+ //=========================================================
+ //Update rate
+-float theta_update_freq = 400; //Hz
+-float theta_update_interval = 1.0/double(theta_update_freq);
++const float theta_update_freq = 400; //Hz
++const float theta_update_interval = 1.0/theta_update_freq;
+ //State vector
+ //[[theta(degree)], [offset of theta_dot(degree/sec)]]
+ float theta_data_predict[2][1];
+@@ -119,198 +118,73 @@
+     return;
+ }
+ 
+-//Matrix inversion (by Gaussian elimination)
+-void mat_inv(float *m, float *sol, int column, int row)
+-{
+-    //allocate memory for a temporary matrix
+-    float* temp = (float *)malloc( column*2*row*sizeof(float) );
+-    
+-    //make the augmented matrix
+-    for(int i=0; i<column; i++)
+-    {
+-        //copy original matrix
+-        for(int j=0; j<row; j++)
+-        {
+-            temp[i*(2*row) + j] = m[i*row + j];  
+-        }
+-        
+-        //make identity matrix
+-        for(int j=row; j<row*2; j++)
+-        {
+-            if(j-row == i)
+-            {
+-                temp[i*(2*row) + j] = 1;
+-            }    
+-            else
+-            {
+-                temp[i*(2*row) + j] = 0;    
+-            }
+-        }
+-    }
+-
+-    //Sweep (down)
+-    for(int i=0; i<column; i++)
+-    {
+-        //pivot selection
+-        float pivot = temp[i*(2*row) + i];
+-        int pivot_index = i;
+-        float pivot_temp;
+-        for(int j=i; j<column;j++)
+-        {
+-            if( temp[j*(2*row)+i] > pivot )
+-            {
+-                pivot = temp[j*(2*row) + i];
+-                pivot_index = j;
+-            }    
+-        }  
+-        if(pivot_index != i)
+-        {
+-            for(int j=0; j<2*row; j++)
+-            {
+-                pivot_temp = temp[ pivot_index * (2*row) + j ];
+-                temp[pivot_index * (2*row) + j] = temp[i*(2*row) + j];
+-                temp[i*(2*row) + j] = pivot_temp;    
+-            }    
+-        }
+-        
+-        //division
+-        for(int j=0; j<2*row; j++)
+-        {
+-            temp[i*(2*row) + j] /= pivot;    
+-        }
+-        
+-        //sweep
+-        for(int j=i+1; j<column; j++)
+-        {
+-            float temp2 = temp[j*(2*row) + i];
+-            
+-            //sweep each row
+-            for(int k=0; k<row*2; k++)
+-            {
+-                temp[j*(2*row) + k] -= temp2 * temp[ i*(2*row) + k ];    
+-            }    
+-        }
+-    }
+-        
+-    //Sweep (up)
+-    for(int i=0; i<column-1; i++)
+-    {
+-        for(int j=i+1; j<column; j++)
+-        {
+-            float pivot = temp[ (column-1-j)*(2*row) + (row-1-i)];   
+-            for(int k=0; k<2*row; k++)
+-            {
+-                temp[(column-1-j)*(2*row)+k] -= pivot * temp[(column-1-i)*(2*row)+k];    
+-            }
+-        }    
+-    }     
+-    
+-    //copy result
+-    for(int i=0; i<column; i++)
+-    {
+-        for(int j=0; j<row; j++)
+-        {
+-            sol[i*row + j] = temp[i*(2*row) + (j+row)];    
+-        }    
+-    }
+-    free(temp);
+-    return;
+-}
+-
+-//=========================================================
+-// I2C common functions
+-//=========================================================
+-//i2c write function
+-void i2c_mem_write(int device_address, int mem_address, int mem_data)
+-{  
+-    int device_address_temp = device_address<<1;
+-    device_address_temp = device_address_temp & 0xfe;
+-
+-    i2c.start();
+-    i2c.write(device_address_temp);
+-    i2c.write(mem_address);
+-    i2c.write(mem_data); 
+-    i2c.stop();   
+-    return;
+-}
+-
+-//i2c read function
+-int i2c_mem_read(int device_address, int mem_address)
+-{   
+-    int device_address_temp = device_address<<1;
+-    int device_address_temp_w = device_address_temp & 0xfe; 
+-    int device_address_temp_r = device_address_temp | 0x01;
+-
+-    i2c.start();
+-    i2c.write(device_address_temp_w);
+-    i2c.write(mem_address);  
+-    i2c.start();
+-    i2c.write(device_address_temp_r);    
+-    int data = i2c.read(0);
+-    i2c.stop();   
+-    return data;
+-}
+-
+ //=========================================================
+ // Accelerometer (BMX055)
+ //=========================================================
+ //get data
+-float get_acc_data()
+-{
+-    //read ACCD_Y_LSB registor (0x04)
+-    int y_temp_L = i2c_mem_read(0x19, 0x04);
+-    y_temp_L = y_temp_L >> 4;
+-    y_temp_L = y_temp_L & 0x0f;
+-    
+-    //read RATE_Y_MSB registor (0x05)
+-    int y_temp_H = i2c_mem_read(0x19, 0x05);
+-    
+-    //calculate Y acceleration
+-    int y_data = y_temp_L + 16 * y_temp_H;
+-    if(y_data > 2047)
+-    {
+-        y_data = -1 * (4096 - y_data);    
+-    }
+-    
+-    //-------------------------------------------    
+-    //read ACCD_Z_LSB registor (0x06)
+-    int z_temp_L = i2c_mem_read(0x19, 0x06);
+-    z_temp_L = z_temp_L >> 4;
+-    z_temp_L = z_temp_L & 0x0f;
+-    
+-    //read RATE_Z_MSB registor (0x07)
+-    int z_temp_H = i2c_mem_read(0x19, 0x07);
+-    
+-    //calculate Z acceleration
+-    int z_data = z_temp_L + 16 * z_temp_H;
+-    if(z_data > 2047)
+-    {
+-        z_data = -1 * (4096 - z_data);    
++float get_acc_data(){
++    uint8_t ay_l, ay_h, az_l, az_h;
++    uint8_t reg;
++
++    reg = register_bmx055+2;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_acc, &ay_l, 1, false);  // false, we're done reading
++
++    reg = register_bmx055+3;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_acc, &ay_h, 1, false);  // false, we're done reading
++
++    float ay =  ay_h<<4 | ay_l>>4;
++    if(ay > 2047){
++        ay -= 4096;
++    }
++    // range: +-2g (0.00958 = 2g/2048)
++    ay = ay * 0.00958;
++
++    reg = register_bmx055+4;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_acc, &az_l, 1, false);  // false, we're done reading
++
++    reg = register_bmx055+5;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_acc, &az_h, 1, false);  // false, we're done reading
++
++    float az =  az_h<<4 | az_l>>4;
++    if(az > 2047){
++        az -= 4096;
+     }
++    // range: +-2g (0.00958 = 2g/2048)
++    az = az * 0.00958;
+ 
+-    //-------------------------------------------  
+-    //calculate theta
+-    float theta_deg = atan( float(z_data) / float(y_data) );
+-    return theta_deg * 57.29578f;   //degree
++    float theta_deg = atan( az / ay ) * 57.29578f;   //degree
++    return theta_deg; 
+ }
+ 
+ //statistical data of accelerometer
+ void acc_init()
+ {              
+-    //initialize "ACC Register 0x0F (PMU_RANGE)"
+-    //Full Scale = +/- 2 G
+-    i2c_mem_write(0x19, 0x0f, 0x03);
+- 
+-    //initialize "ACC Register 0x10 (PMU_BW)"
+-    //Filter Bandwidth = 1000 Hz
+-    i2c_mem_write(0x19, 0x10, 0x0f);
++
++    // use the "handheld device dynamic" optimal setting (see datasheet)
++    uint8_t buf[2];
++
++    // Range=+-2g
++    buf[0] = 0x0F;
++    buf[1] = 0x03;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, buf, 2, false);
++    sleep_ms(100);
++
++    // Bandwidth = 1000 Hz
++    buf[0] = 0x10;
++    buf[1] = 0x0F;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, buf, 2, false);
++    sleep_ms(100);
+  
+     //get data
+     float theta_array[sample_num];
+     for(int i=0; i<sample_num; i++)
+     {
+         theta_array[i] = get_acc_data();    
+-        wait( meas_interval );
++        sleep_ms( (int)(meas_interval*1000) );
+     }
+     
+     //calculate mean
+@@ -337,41 +211,53 @@
+ // Gyroscope (BMX055)
+ //=========================================================
+ //get data
+-float get_gyro_data()
+-{    
+-    //read RATE_X_LSB registor (0x02)
+-    int x_temp_L = i2c_mem_read(0x69, 0x02);
+-    //read RATE_X_MSB registor
+-    int x_temp_H = i2c_mem_read(0x69, 0x03);
+-    
+-    //calculate X angular ratio
+-    int x_data = x_temp_L + 256 * x_temp_H;
+-    if(x_data > 32767)
+-    {
+-        x_data = -1 * (65536 - x_data);    
++float get_gyro_data(){
++    uint8_t ox_l, ox_h;
++    uint8_t reg;
++
++    reg = register_bmx055;
++    i2c_write_blocking(i2c_default, address_bmx055_gyro, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_gyro, &ox_l, 1, false);  // false, we're done reading
++
++    reg = register_bmx055+1;
++    i2c_write_blocking(i2c_default, address_bmx055_gyro, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_gyro, &ox_h, 1, false);  // false, we're done reading
++
++    float ox = ox_h<<8 | ox_l;
++    if ( ox > 32767) {
++        ox -= 65536;
+     }
+-    x_data = -1 * x_data;
+-    return x_data*0.00762939f; //degree per second
++    // range: +-250 deg/s (0.00762939 = 250/32768)
++    ox = ox * 0.00762939;
++
++    return -ox;
+ }
+ 
+ //statistical data of gyro
+ void gyro_init()
+ {
+-    //initialize "GYR Register 0x0F (RANGE)"
+-    //Full Scale = +/- 250 deg/s
+-    i2c_mem_write(0x69, 0x0f, 0x03);
+-
+-    //initialize "GYR Register 0x10 (BW)"
+-    //Output data rate = 1000 Hz
+-    //Filter bandwidth = 116 Hz
+-    i2c_mem_write(0x69, 0x10, 0x02);
++
++    // use the "handheld device dynamic" optimal setting (see datasheet)
++    uint8_t buf[2];
++
++    // Range=+-250 deg/s
++    buf[0] = 0x0F;
++    buf[1] = 0x03;
++    i2c_write_blocking(i2c_default, address_bmx055_gyro, buf, 2, false);
++    sleep_ms(100);
++
++    // ODR=1000Hz, Filter Bandwidth=116
++    buf[0] = 0x10;
++    buf[1] = 0x02;
++    i2c_write_blocking(i2c_default, address_bmx055_gyro, buf, 2, false);
++    sleep_ms(100);
+    
+     //get data
+     float theta_dot_array[sample_num];
+     for(int i=0;i<sample_num;i++)
+     {
+         theta_dot_array[i] = get_gyro_data();    
+-        wait(meas_interval);
++        sleep_ms((int)(meas_interval*1000));
+     }
+     
+     //calculate mean
+@@ -397,12 +283,14 @@
+ 
+ //=========================================================
+ //Kalman filter for "theta" & "theta_dot_bias" 
+-//It takes 650 usec. (NUCLEO-F401RE 84MHz, BMX055)
++//It takes 800 usec. (Raspberry Pi Pico, BMX055)
+ //=========================================================
+-void update_theta()
++float y;
++bool update_theta(struct repeating_timer *t)
+ {     
+     //measurement data
+-    float y = get_acc_data(); //degree
++    //float y = get_acc_data(); //degree
++    y = get_acc_data(); //degree
+     
+     //input data
+     float theta_dot_gyro = get_gyro_data(); //degree/sec
+@@ -455,6 +343,8 @@
+     float BUBT[2][2] = {};
+     mat_mul_const(BBT[0], theta_dot_variance, BUBT[0], 2, 2);//BUB^T
+     mat_add(APAT[0], BUBT[0], P_theta_predict[0], 2, 2);//APA^T+BUB^T
++
++    return true;
+ }
+ 
+ 
+@@ -463,17 +353,14 @@
+ //=========================================================
+ int main()
+ {   
+-    //LED
+-    led1 = 0;
+-    wait(1);   //wait 1 sec
+-    led1 = 1;
+-
+-    //UART initialization
+-    uart_usb.baud(115200);
+-    uart_usb.format(8, Serial::None, 1);   
+ 
+-    //I2C initialization
+-    i2c.frequency(400000); //400 kHz
++    stdio_init_all();
++
++    i2c_init(i2c_default, 400 * 1000); // 400kHz
++    gpio_set_function(PICO_DEFAULT_I2C_SDA_PIN, GPIO_FUNC_I2C);
++    gpio_set_function(PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C);
++    gpio_pull_up(PICO_DEFAULT_I2C_SDA_PIN);
++    gpio_pull_up(PICO_DEFAULT_I2C_SCL_PIN);
+ 
+     //Accelerometer & Gyro calibration
+     acc_init(); 
+@@ -492,15 +379,13 @@
+ 
+     //Timer
+     //Kalman filter (theta & theta_dot), 400 Hz
+-    timer1.attach(&update_theta, theta_update_interval);
++    struct repeating_timer timer;
++    add_repeating_timer_us(-(int)(theta_update_interval*1000000), &update_theta, NULL, &timer);
+ 
+-    //initialization done
+-    led1 = 0;
+-    
+     //Main loop
+     while(1)
+     {
+-        uart_usb.printf("theta = %f degree\r\n", theta_data[0][0]);
+-        wait(0.05);    
++        printf("%f %f\r\n", theta_data[0][0], y);
++        sleep_ms(100);    
+     }    
+ }
+--- KalmanFinal/SolveRiccatiEquation.py.orig	2024-02-23 17:07:56.024425745 +0900
++++ KalmanFinal/SolveRiccatiEquation.py	2024-02-23 16:52:36.000000000 +0900
+@@ -43,7 +43,8 @@
+ #Chassis (Tamiya universal plate L)
+ #-------------------------------------------------
+ #mass (kg)
+-m_plate = 0.080 /2
++#m_plate = 0.080 /2
++m_plate = 0.108 /2
+ #length (m)
+ y_plate = 0.210
+ #The length between the center of gravity and the axis (m)
+@@ -61,7 +62,8 @@
+ x_battery = 0.015
+ y_battery = 0.056
+ #The length between the center of gravity and the axis (m)
+-d_battery = 0.065
++#d_battery = 0.065
++d_battery = 0.085
+ #The moment of inertia of the battery box about the shaft (kg.m^2)
+ I_battery = 1/12 * m_battery*(x_battery*x_battery + y_battery*y_battery) 
+ m_battery * d_battery * d_battery
+@@ -70,12 +72,15 @@
+ #Circuit board (NUCLEO)
+ #-------------------------------------------------
+ #mass (kg)
+-m_circuit = 0.100 /2
++#m_circuit = 0.100 /2
++m_circuit = 0.0406 /2
+ #length (m)
+ x_circuit = 0.010
+-y_circuit = 0.095
++#y_circuit = 0.095
++y_circuit = 0.070
+ #The length between the center of gravity and the axis (m)
+-d_circuit = 0.140
++#d_circuit = 0.140
++d_circuit = 0.165
+ #The moment of inertia of the battery box about the shaft (kg.m^2)
+ I_circuit = 1/12 * m_circuit*(x_circuit*x_circuit + y_circuit*y_circuit) +\
+ m_circuit * d_circuit * d_circuit
+--- KalmanFinal/Inverted_Pendulum_Kalman.cpp.orig	2024-02-23 17:08:06.492310831 +0900
++++ KalmanFinal/Inverted_Pendulum_Kalman.cpp	2024-02-23 16:51:50.000000000 +0900
+@@ -1,29 +1,24 @@
+ //=========================================================
+ //Inverted Pendulum with Kalman Filter
+-//MPU board:  NUCLEO-F401RE
++//MPU board:  Raspberry Pi Pico
+ //Accelerometer + Gyro sensor: BMX055
+ //Motor driver: TA7291P x 2
+ //2019/03/01  N. Beppu
++//2024/2/23 T. Kanamaru
+ //=========================================================
+-#include "mbed.h"
+-#include "math.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <math.h>
++#include "pico/stdlib.h"
++#include "hardware/i2c.h"
++#include "hardware/pwm.h"
++#include "pico/multicore.h"
+ 
+ //=========================================================
+-//Port Setting
+-DigitalOut led1(LED1);  //LED on the NUCLEO board
+-I2C i2c(PB_9, PB_8);    // Gyro + ACC (SDA, SCLK)
+-BusIn encoder_bus(PC_11, PD_2); //Encoder (LSB to MSB)
+-DigitalOut IN1(PC_8);   //TA7291P IN1
+-DigitalOut IN2(PC_6);   //TA7291P IN2
+-PwmOut motor(PC_9);     //TA7291P Vref
+-DigitalOut led_r(PC_0); //Red LED
+-DigitalOut led_g(PC_1); //Green LED
+-DigitalOut led_y(PC_2); //Yellow LED
+-
+-//=========================================================
+-//Ticker
+-Ticker timer1; //for rotary encoder
+-Ticker timer2; //for Kalman filter (angle)
++//I2C addresses
++const uint address_bmx055_acc = 0x19;
++const uint address_bmx055_gyro = 0x69;
++const uint register_bmx055 = 0x02;
+ 
+ //=========================================================
+ //Accelerometer and gyro statistical data
+@@ -36,7 +31,7 @@
+ 
+ //=========================================================
+ //Rotary encoder variables
+-int rotary_encoder_update_rate = 25; //usec
++int rotary_encoder_update_interval = 25; //usec
+ int rotary_encoder_resolution = 100;
+ int encoder_value = 0;
+ int table[16] = {0, 1, -1, 0,  -1, 0, 0, 1,  1, 0, 0, -1,  0, -1, 1, 0};
+@@ -45,8 +40,8 @@
+ //=========================================================
+ //Kalman filter (for angle estimation) variables
+ //Update rate
+-float theta_update_freq = 400; //Hz
+-float theta_update_interval = 1.0f/theta_update_freq;
++const float theta_update_freq = 400; //Hz
++const float theta_update_interval = 1.0/theta_update_freq;
+ //State vector
+ //[[theta(degree)], [offset of theta_dot(degree/sec)]]
+ float theta_data_predict[2][1];
+@@ -61,6 +56,8 @@
+ //"C" of the state equation
+ float C_theta[1][2] = {{1, 0}};
+ 
++float temp[32];
++
+ //=========================================================
+ //Kalman filter (for all system estimation) variables
+ //State vector
+@@ -72,17 +69,25 @@
+ float P_x[4][4];
+ //"A" of the state equation (update freq = 100 Hz)
+ float A_x[4][4] = {
+-{1.00210e+00,1.00070e-02,0.00000e+00,3.86060e-05},
+-{4.20288e-01,1.00210e+00,0.00000e+00,7.65676e-03},
+-{-1.15751e-03,-3.87467e-06,1.00000e+00,9.74129e-03},
+-{-2.29569e-01,-1.15751e-03,0.00000e+00,9.48707e-01}
++//{1.00210e+00,1.00070e-02,0.00000e+00,3.86060e-05},
++//{4.20288e-01,1.00210e+00,0.00000e+00,7.65676e-03},
++//{-1.15751e-03,-3.87467e-06,1.00000e+00,9.74129e-03},
++//{-2.29569e-01,-1.15751e-03,0.00000e+00,9.48707e-01}
++{1.00228403e+00, 1.00076152e-02, 0.00000000e+00, 5.00596903e-05},
++{4.56633384e-01, 1.00228403e+00, 0.00000000e+00, 9.91639661e-03},
++{-1.02944982e-03, -3.44810401e-06, 1.00000000e+00, 9.70509446e-03},
++{-2.03925206e-01, -1.02944982e-03, 0.00000000e+00, 9.41602708e-01}
+ };
+ //"B" of the state equation (update freq = 100 Hz)
+ float B_x[4][1] = {
+-{-2.70805e-04},
+-{-5.37090e-02},
+-{1.81472e-03},
+-{3.59797e-01}
++//{-2.70805e-04},
++//{-5.37090e-02},
++//{1.81472e-03},
++//{3.59797e-01}
++{-3.21885869e-04},
++{-6.37628383e-02},
++{1.89625477e-03},
++{3.75496994e-01}
+ };
+ //"C" of the state equation (update freq = 100 Hz)
+ float C_x[4][4] = {
+@@ -94,22 +99,24 @@
+ //measurement noise
+ float measure_variance_mat[4][4];
+ //System noise
+-float voltage_error = 0.01; //volt
++const float voltage_error = 0.01; //volt
+ float voltage_variance = voltage_error * voltage_error;
+ 
+ //=========================================================
+ //Motor control variables
+-float feedback_rate = 0.01; //sec
++float feedback_interval_sec = 0.01; //sec
++float feedback_interval_sec_wait = 0.0086; //sec
+ float motor_value = 0;
+-int pwm_width = 0;
++float pwm_width = 0;
+ int motor_direction = 1;
+ float motor_offset = 0.17; //volt
+ 
+ //=========================================================
+ //Gain vector for the state feedback 
+ //(R=1000, Q = diag(1, 1, 10, 10), f=100Hz)
+-float Gain[4] = {29.87522919, 4.59857246, 0.09293, 0.37006248};
+-
++//float Gain[4] = {29.87522919, 4.59857246, 0.09293, 0.37006248};
++float Gain[4] = {28.83829894, 4.35927862, 0.0928175, 0.36917531};
++ 
+ //=========================================================
+ // Matrix common functions
+ //=========================================================
+@@ -185,9 +192,6 @@
+ //Matrix inversion (by Gaussian elimination)
+ void mat_inv(float *m, float *sol, int column, int row)
+ {
+-    //allocate memory for a temporary matrix
+-    float* temp = (float *)malloc( column*2*row*sizeof(float) );
+-    
+     //make the augmented matrix
+     for(int i=0; i<column; i++)
+     {
+@@ -276,104 +280,76 @@
+             sol[i*row + j] = temp[i*(2*row) + (j+row)];    
+         }    
+     }
+-    free(temp);
+     return;
+ }
+ 
+ //=========================================================
+-// I2C common functions
+-//=========================================================
+-//i2c write function
+-void i2c_mem_write(int device_address, int mem_address, int mem_data)
+-{  
+-    int device_address_temp = device_address<<1;
+-    device_address_temp = device_address_temp & 0xfe;
+-
+-    i2c.start();
+-    i2c.write(device_address_temp);
+-    i2c.write(mem_address);
+-    i2c.write(mem_data); 
+-    i2c.stop();   
+-    return;
+-}
+-
+-//i2c read function
+-int i2c_mem_read(int device_address, int mem_address)
+-{   
+-    int device_address_temp = device_address<<1;
+-    int device_address_temp_w = device_address_temp & 0xfe; 
+-    int device_address_temp_r = device_address_temp | 0x01;
+-
+-    i2c.start();
+-    i2c.write(device_address_temp_w);
+-    i2c.write(mem_address);  
+-    i2c.start();
+-    i2c.write(device_address_temp_r);    
+-    int data = i2c.read(0);
+-    i2c.stop();   
+-    return data;
+-}
+-
+-//=========================================================
+ // Accelerometer (BMX055)
+ //=========================================================
+ //get data
+-float get_acc_data()
+-{
+-    //read ACCD_Y_LSB registor (0x04)
+-    int y_temp_L = i2c_mem_read(0x19, 0x04);
+-    y_temp_L = y_temp_L >> 4;
+-    y_temp_L = y_temp_L & 0x0f;
+-    
+-    //read RATE_Y_MSB registor (0x05)
+-    int y_temp_H = i2c_mem_read(0x19, 0x05);
+-    
+-    //calculate Y acceleration
+-    int y_data = y_temp_L + 16 * y_temp_H;
+-    if(y_data > 2047)
+-    {
+-        y_data = -1 * (4096 - y_data);    
+-    }
+-    
+-    //-----------------------------------------------------    
+-    //read ACCD_Z_LSB registor (0x06)
+-    int z_temp_L = i2c_mem_read(0x19, 0x06);
+-    z_temp_L = z_temp_L >> 4;
+-    z_temp_L = z_temp_L & 0x0f;
+-    
+-    //read RATE_Z_MSB registor (0x07)
+-    int z_temp_H = i2c_mem_read(0x19, 0x07);
+-    
+-    //calculate Z acceleration
+-    int z_data = z_temp_L + 16 * z_temp_H;
+-    if(z_data > 2047)
+-    {
+-        z_data = -1 * (4096 - z_data);    
++float get_acc_data(){
++    uint8_t ay_l, ay_h, az_l, az_h;
++    uint8_t reg;
++
++    reg = register_bmx055+2;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_acc, &ay_l, 1, false);  // false, we're done reading
++
++    reg = register_bmx055+3;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_acc, &ay_h, 1, false);  // false, we're done reading
++
++    float ay =  ay_h<<4 | ay_l>>4;
++    if(ay > 2047){
++        ay -= 4096;
++    }
++    // range: +-2g (0.00958 = 2g/2048)
++    ay = ay * 0.00958;
++
++    reg = register_bmx055+4;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_acc, &az_l, 1, false);  // false, we're done reading
++
++    reg = register_bmx055+5;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_acc, &az_h, 1, false);  // false, we're done reading
++
++    float az =  az_h<<4 | az_l>>4;
++    if(az > 2047){
++        az -= 4096;
+     }
++    // range: +-2g (0.00958 = 2g/2048)
++    az = az * 0.00958;
+ 
+-    //-----------------------------------------------------  
+-    //calculate theta
+-    float theta_deg = atan( float(z_data) / float(y_data) );
+-    return (float)theta_deg * 57.29578f;   //degree
++    float theta_deg = atan( az / ay ) * 57.29578f;   //degree
++    return theta_deg; 
+ }
+ 
+ //statistical data of accelerometer
+ void acc_init()
+-{             
+-    //initialize ACC register 0x0F (range)
+-    //Full scale = +/- 2 G
+-    i2c_mem_write(0x19, 0x0f, 0x03);
+- 
+-    //initialize ACC register 0x10 (band width)
+-    //Filter bandwidth = 1000 Hz
+-    i2c_mem_write(0x19, 0x10, 0x0f);
++{              
++
++    // use the "handheld device dynamic" optimal setting (see datasheet)
++    uint8_t buf[2];
+ 
++    // Range=+-2g
++    buf[0] = 0x0F;
++    buf[1] = 0x03;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, buf, 2, false);
++    sleep_ms(100);
++
++    // Bandwidth = 1000 Hz
++    buf[0] = 0x10;
++    buf[1] = 0x0F;
++    i2c_write_blocking(i2c_default, address_bmx055_acc, buf, 2, false);
++    sleep_ms(100);
++ 
+     //get data
+     float theta_array[sample_num];
+     for(int i=0; i<sample_num; i++)
+     {
+         theta_array[i] = get_acc_data();    
+-        wait( meas_interval );
++        sleep_ms( (int)(meas_interval*1000) );
+     }
+     
+     //calculate mean
+@@ -400,41 +376,53 @@
+ // Gyroscope (BMX055)
+ //=========================================================
+ //get data
+-float get_gyro_data()
+-{    
+-    //read RATE_X_LSB registor (0x02)
+-    int x_temp_L = i2c_mem_read(0x69, 0x02);
+-    //read RATE_X_MSB registor
+-    int x_temp_H = i2c_mem_read(0x69, 0x03);
+-    
+-    //calculate X angular ratio
+-    int x_data = x_temp_L + 256 * x_temp_H;
+-    if(x_data > 32767)
+-    {
+-        x_data = -1 * (65536 - x_data);    
+-    }
+-    x_data = -1 * x_data;
+-    // +1000 (deg/sec) / 2^15 = 0.0305176
+-    return float(x_data) * 0.0305176f; // deg/sec
++float get_gyro_data(){
++    uint8_t ox_l, ox_h;
++    uint8_t reg;
++
++    reg = register_bmx055;
++    i2c_write_blocking(i2c_default, address_bmx055_gyro, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_gyro, &ox_l, 1, false);  // false, we're done reading
++
++    reg = register_bmx055+1;
++    i2c_write_blocking(i2c_default, address_bmx055_gyro, &reg, 1, true);  // true to keep master control of bus
++    i2c_read_blocking(i2c_default, address_bmx055_gyro, &ox_h, 1, false);  // false, we're done reading
++
++    float ox = ox_h<<8 | ox_l;
++    if ( ox > 32767) {
++        ox -= 65536;
++    }
++    // range: +-1000 deg/s 
++    ox = ox * 0.0305176f;
++
++    return -ox;
+ }
+ 
+ //statistical data of gyro
+ void gyro_init()
+-{             
+-    //initialize Gyro register 0x0F (range)
+-    //Full scale = +/- 1000 deg/s
+-    i2c_mem_write(0x69, 0x0f, 0x01);
+-     
+-    //initialize Gyro register 0x10 (band width)
+-    //Data rate = 1000 Hz, Filter bandwidth = 116 Hz
+-    i2c_mem_write(0x69, 0x10, 0x02); 
+-  
++{
++
++    // use the "handheld device dynamic" optimal setting (see datasheet)
++    uint8_t buf[2];
++
++    // Range=+-1000 deg/s
++    buf[0] = 0x0F;
++    buf[1] = 0x01;
++    i2c_write_blocking(i2c_default, address_bmx055_gyro, buf, 2, false);
++    sleep_ms(100);
++
++    // ODR=1000Hz, Filter Bandwidth=116
++    buf[0] = 0x10;
++    buf[1] = 0x02;
++    i2c_write_blocking(i2c_default, address_bmx055_gyro, buf, 2, false);
++    sleep_ms(100);
++   
+     //get data
+     float theta_dot_array[sample_num];
+     for(int i=0;i<sample_num;i++)
+     {
+         theta_dot_array[i] = get_gyro_data();    
+-        wait(meas_interval);
++        sleep_ms((int)(meas_interval*1000));
+     }
+     
+     //calculate mean
+@@ -459,28 +447,36 @@
+ 
+ //=========================================================
+ //Rotary encoder polling function
+-//It takes 4usec. (NUCLEO-F401RE 84MHz)
++//It takes 280nsec. (Raspberry Pi Pico)
+ //=========================================================
++const uint ABIT_PIN = 16;
++const uint BBIT_PIN = 17;
+ void rotary_encoder_check()
+ {  
+     static int code; 
+     //check the movement
+-    code = ( (code<<2) +  int(encoder_bus) ) & 0xf ;
++    code = ( (code<<2) + (gpio_get(BBIT_PIN)<<1) +  gpio_get(ABIT_PIN) ) & 0xf ;
+     //update the encoder value
+     int value = -1 * table[code];
+     encoder_value += value;
+     return;
+ }
++void core1_entry() {
++    while (1){
++        rotary_encoder_check();
++        sleep_us(rotary_encoder_update_interval); // 25 us
++    }
++}
+ 
+ //=========================================================
+ //Kalman filter for "theta" & "theta_dot_bias" 
+-//It takes 650 usec. (NUCLEO-F401RE 84MHz, BMX055)
++//It takes 800 usec. (Raspberry Pi Pico, BMX055)
+ //=========================================================
+-void update_theta()
++bool calculatingTheta = false;
++bool update_theta(struct repeating_timer *t)
+ {     
+-    //detach the rotary encoder polling
+-    timer1.detach();
+ 
++    calculatingTheta = true;
+     //measurement data
+     float y = get_acc_data(); //degree
+     
+@@ -535,50 +531,86 @@
+     float BUBT[2][2] = {};
+     mat_mul_const(BBT[0], theta_dot_variance, BUBT[0], 2, 2);//BUB^T
+     mat_add(APAT[0], BUBT[0], P_theta_predict[0], 2, 2);//APA^T+BUB^T
+-   
+-    //attach a timer for the rotary encoder (40 kHz)
+-    timer1.attach_us(&rotary_encoder_check, rotary_encoder_update_rate); 
++
++    calculatingTheta = false;
++
++    return true;
+ }
+ 
+ 
+ //=========================================================
+ // Main
+ //=========================================================
+-int main() {   
++const uint LED_ONBOARD_PIN = 25;
++const uint LED_R_PIN = 13;
++const uint LED_G_PIN = 12;
++const uint LED_Y_PIN = 11;
++
++const uint PWM_PIN = 18;
++const uint IN1_PIN = 19;
++const uint IN2_PIN = 20;
++
++uint led1 = 0;
++int main()
++{   
++
++    stdio_init_all();
+ 
+     //-------------------------------------------
+     //LED
+     //-------------------------------------------
+-    led1 = 0;
+-    led_r = 0;
+-    led_g = 0;
+-    led_y = 0;
+-    wait(1);   //wait 1 sec
+-    led_y = 1; //turns on the yellow LED 
++    gpio_init(LED_ONBOARD_PIN);
++    gpio_set_dir(LED_ONBOARD_PIN, GPIO_OUT);
++    gpio_init(LED_R_PIN);
++    gpio_set_dir(LED_R_PIN, GPIO_OUT);
++    gpio_init(LED_G_PIN);
++    gpio_set_dir(LED_G_PIN, GPIO_OUT);
++    gpio_init(LED_Y_PIN);
++    gpio_set_dir(LED_Y_PIN, GPIO_OUT);
++    gpio_put(LED_ONBOARD_PIN, led1);
++    gpio_put(LED_R_PIN, 0);
++    gpio_put(LED_G_PIN, 0);
++    gpio_put(LED_Y_PIN, 1);
++    sleep_ms(1000);
+ 
+     //-------------------------------------------
+     //I2C initialization
+     //-------------------------------------------
+-    i2c.frequency(400000); //400 kHz
++    i2c_init(i2c_default, 400 * 1000); // 400kHz
++    gpio_set_function(PICO_DEFAULT_I2C_SDA_PIN, GPIO_FUNC_I2C);
++    gpio_set_function(PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C);
++    gpio_pull_up(PICO_DEFAULT_I2C_SDA_PIN);
++    gpio_pull_up(PICO_DEFAULT_I2C_SCL_PIN);
+ 
+     //-------------------------------------------
+     //Accelerometer & Gyro initialization
+     //-------------------------------------------
+-    acc_init(); 
++    acc_init();
+     gyro_init();
+-    
++
+     //-------------------------------------------
+     //Rotary encoder initialization
+     //-------------------------------------------
+-    encoder_value = 0;  
++    gpio_init(ABIT_PIN);
++    gpio_set_dir(ABIT_PIN, GPIO_IN);
++    gpio_init(BBIT_PIN);
++    gpio_set_dir(BBIT_PIN, GPIO_IN);
+ 
+     //-------------------------------------------
+     //Motor driver intialization
+     //-------------------------------------------
+-    IN1 = 0; //motor stop
+-    IN2 = 0; //motor stop
+-    motor.period_us(100);   //10 kHz pulse
+-    motor.pulsewidth_us(0); //0 to 100
++    gpio_set_function(PWM_PIN, GPIO_FUNC_PWM);
++    gpio_init(IN1_PIN);
++    gpio_set_dir(IN1_PIN, GPIO_OUT);
++    gpio_init(IN2_PIN);
++    gpio_set_dir(IN2_PIN, GPIO_OUT);
++    gpio_put(IN1_PIN, 0); // motor stop
++    gpio_put(IN2_PIN, 0); // motor stop
++    uint slice_num = pwm_gpio_to_slice_num(PWM_PIN);
++    pwm_config pwm_slice_config = pwm_get_default_config();
++    pwm_config_set_wrap( &pwm_slice_config, 12512 ); // 100 us
++    pwm_init( slice_num, &pwm_slice_config, true );
++    pwm_set_gpio_level( PWM_PIN, ( pwm_slice_config.top * 0.00 ) ); // 0%
+ 
+     //-------------------------------------------
+     //Kalman filter (angle) initialization
+@@ -666,35 +698,41 @@
+     measure_variance_mat[1][1] = theta_dot_variance * deg_rad_coeff;
+     float encoder_error = 0.1f*2*3.14f/(4*rotary_encoder_resolution);
+     measure_variance_mat[2][2] = encoder_error * encoder_error;
+-    float encoder_rate_error = encoder_error / feedback_rate;
++    float encoder_rate_error = encoder_error / feedback_interval_sec;
+     measure_variance_mat[3][3] = encoder_rate_error * encoder_rate_error;
+ 
+     //-------------------------------------------  
+     //Timer
+     //-------------------------------------------  
+-    //timer1: rotary encoder polling, 40 kHz
+-    timer1.attach_us(&rotary_encoder_check, rotary_encoder_update_rate);
+-    //timer2: Kalman filter (theta & theta_dot), 400 Hz
+-    timer2.attach(&update_theta, theta_update_interval);
++    //Kalman filter (theta & theta_dot), 400 Hz
++    multicore_launch_core1(core1_entry);
++    struct repeating_timer timer;
++    add_repeating_timer_us(-(int)(theta_update_interval*1000000), &update_theta, NULL, &timer);
+ 
+     //-------------------------------------------  
+     //initialization done
+     //-------------------------------------------  
+-    led_y = 0;
+- 
++    gpio_put(LED_Y_PIN, 0);
++
+     //===========================================
+     //Main loop
+-    //it takes 700 usec (calculation)
++    //it takes 1450 usec (calculation)
+     //===========================================    
+     while(1)
+     {
+         //stop theta update process
+-        timer2.detach();
+-        
++        bool cancelled = cancel_repeating_timer(&timer);
++        while(calculatingTheta){
++            sleep_us(10);
++        }
++        if(!cancelled){
++            printf("cancel failed\n");
++        } 
+         //turn off LEDs
+-        led1 = !led1;
+-        led_g = 0;
+-        led_r = 0;
++        led1 = 1 - led1;
++        gpio_put(LED_ONBOARD_PIN, led1);
++        gpio_put(LED_R_PIN, 0);
++        gpio_put(LED_G_PIN, 0);
+          
+         //---------------------------------------
+         //Kalman Filter (all system)
+@@ -704,7 +742,7 @@
+         theta1_dot_temp = get_gyro_data();
+         y[1][0] = ( theta1_dot_temp - theta_data[1][0]) * 3.14f/180;
+         y[2][0] = encoder_value * (2*3.14f)/(4*rotary_encoder_resolution);
+-        y[3][0] = (y[2][0] - pre_theta2)/feedback_rate;    
++        y[3][0] = (y[2][0] - pre_theta2)/feedback_interval_sec;    
+                 
+         //calculate Kalman gain: G = P'C^T(W+CP'C^T)^-1
+         mat_tran(C_x[0], tran_C_x[0], 4, 4);//C^T
+@@ -713,7 +751,7 @@
+         mat_add(G_temp1[0], measure_variance_mat[0], G_temp2[0], 4, 4);//W+CP'C^T
+         mat_inv(G_temp2[0], G_temp2_inv[0], 4, 4);//(W+CP'C^T)^-1
+         mat_mul(P_CT[0], G_temp2_inv[0], G[0], 4, 4, 4, 4); //P'C^T(W+CP'C^T)^-1
+-        
++ 
+         //x_data estimation: x = x'+G(y-Cx')
+         mat_mul(C_x[0], x_data_predict[0], C_x_x[0], 4, 4, 4, 1);//Cx'
+         mat_sub(y[0], C_x_x[0], delta_y[0], 4, 1);//y-Cx'
+@@ -759,11 +797,11 @@
+         { 
+             motor_value += Gain[i] * x_data[i][0];
+         }
+-        
++
+         //offset
+         if(motor_value > 0)
+         {
+-            motor_value += motor_offset ;   
++            motor_value += motor_offset;   
+         }
+         if(motor_value < 0)
+         {
+@@ -771,28 +809,29 @@
+         }
+         
+         //calculate PWM pulse width
+-        pwm_width = int( motor_value*100.0f/3.3f );
++        pwm_width = motor_value/3.3f;  // duty in [0, 1]
+         
++        //printf("%f\n", pwm_width);
+         //drive the motor in forward
+         if(pwm_width>=0)
+         {
+             //over voltage
+-            if(pwm_width>100)
++            if(pwm_width>1)
+             {
+-                pwm_width = 100;    
++                pwm_width = 1;    
+             }         
+             //to protect TA7291P
+             if(motor_direction == 2)
+             {
+-                IN1 = 0;
+-                IN2 = 0;
+-                wait(0.0001); //wait 100 usec    
++                gpio_put(IN1_PIN, 0);
++                gpio_put(IN2_PIN, 0);
++                sleep_us(100); //wait 100 usec    
+             }        
+             //forward
+-            IN1 = 1;
+-            IN2 = 0;
+-            led_g = 1;
+-            motor.pulsewidth_us(pwm_width);
++            gpio_put(IN1_PIN, 1);
++            gpio_put(IN2_PIN, 0);
++            gpio_put(LED_G_PIN, 1);
++            pwm_set_gpio_level( PWM_PIN, ( pwm_slice_config.top * pwm_width ) );
+             motor_direction = 1;
+         }      
+         //drive the motor in reverse
+@@ -802,31 +841,32 @@
+             pwm_width = -1 * pwm_width;
+ 
+             //over voltage
+-            if(pwm_width>100)
++            if(pwm_width>1)
+             {
+-                pwm_width = 100;    
++                pwm_width = 1;    
+             }
+             //to protect TA7291P
+             if(motor_direction == 1)
+             {
+-                IN1 = 0;
+-                IN2 = 0;
+-                wait(0.0001); //wait 100 usec    
++                gpio_put(IN1_PIN, 0);
++                gpio_put(IN2_PIN, 0);
++                sleep_us(100); //wait 100 usec    
+             }
+             //reverse
+-            IN1 = 0;
+-            IN2 = 1;
+-            led_r = 1;
+-            motor.pulsewidth_us(pwm_width);
++            gpio_put(IN1_PIN, 0);
++            gpio_put(IN2_PIN, 1);
++            gpio_put(LED_R_PIN, 1);
++            pwm_set_gpio_level( PWM_PIN, ( pwm_slice_config.top * pwm_width ) );
+             motor_direction = 2;          
+         }
+         
+         // prepare for the next calculation of theta2_dot
+         pre_theta2 = y[2][0];
+         // start the angle update process
+-        timer2.attach(&update_theta, theta_update_interval);
++        add_repeating_timer_us(-(int)(theta_update_interval*1000000), &update_theta, NULL, &timer);
+         // wait 
+-        wait(feedback_rate);    
++        //printf("%f %f\n", y[0][0]*180/3.14, y[2][0]*180/3.14);
++        sleep_us((int)(feedback_interval_sec_wait*1000*1000));    
+     }    
+     //===========================================
+     //Main loop (end)
