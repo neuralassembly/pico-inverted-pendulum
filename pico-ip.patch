@@ -1,5 +1,5 @@
---- KalmanAngle/Inclinometer.cpp.orig	2024-02-23 17:02:43.387855722 +0900
-+++ KalmanAngle/Inclinometer.cpp	2024-02-23 17:04:51.054455429 +0900
+--- KalmanAngle/Inclinometer.cpp.orig	2024-02-26 14:49:35.949781507 +0900
++++ KalmanAngle/Inclinometer.cpp	2024-02-26 14:49:48.177735696 +0900
 @@ -1,21 +1,20 @@
  //=========================================================
  //Inclinometer
@@ -374,7 +374,7 @@
  //=========================================================
  //Kalman filter for "theta" & "theta_dot_bias" 
 -//It takes 650 usec. (NUCLEO-F401RE 84MHz, BMX055)
-+//It takes 800 usec. (Raspberry Pi Pico, BMX055)
++//It takes 820 usec. (Raspberry Pi Pico, BMX055)
  //=========================================================
 -void update_theta()
 +float y;
@@ -441,8 +441,8 @@
 +        sleep_ms(100);    
      }    
  }
---- KalmanFinal/SolveRiccatiEquation.py.orig	2024-02-23 17:07:56.024425745 +0900
-+++ KalmanFinal/SolveRiccatiEquation.py	2024-02-23 16:52:36.000000000 +0900
+--- KalmanFinal/SolveRiccatiEquation.py.orig	2024-02-26 14:47:29.726253754 +0900
++++ KalmanFinal/SolveRiccatiEquation.py	2024-02-26 14:48:04.370124263 +0900
 @@ -43,7 +43,8 @@
  #Chassis (Tamiya universal plate L)
  #-------------------------------------------------
@@ -482,8 +482,18 @@
  #The moment of inertia of the battery box about the shaft (kg.m^2)
  I_circuit = 1/12 * m_circuit*(x_circuit*x_circuit + y_circuit*y_circuit) +\
  m_circuit * d_circuit * d_circuit
---- KalmanFinal/Inverted_Pendulum_Kalman.cpp.orig	2024-02-23 17:08:06.492310831 +0900
-+++ KalmanFinal/Inverted_Pendulum_Kalman.cpp	2024-02-23 16:51:50.000000000 +0900
+@@ -219,7 +224,8 @@
+ #Calculate matrix Ax, Bx, Cx (discrete time)
+ #===========================================================
+ #sampling rate of the discrete time system
+-T = 0.01 #sec
++#T = 0.01 #sec
++T = 0.014 #sec
+ 
+ #-------------------------------------------------
+ #matrix Ax (discrete time)
+--- KalmanFinal/Inverted_Pendulum_Kalman.cpp.orig	2024-02-26 14:47:26.258266711 +0900
++++ KalmanFinal/Inverted_Pendulum_Kalman.cpp	2024-02-26 14:47:59.066144095 +0900
 @@ -1,29 +1,24 @@
  //=========================================================
  //Inverted Pendulum with Kalman Filter
@@ -542,8 +552,8 @@
  //Update rate
 -float theta_update_freq = 400; //Hz
 -float theta_update_interval = 1.0f/theta_update_freq;
-+const float theta_update_freq = 400; //Hz
-+const float theta_update_interval = 1.0/theta_update_freq;
++//const float theta_update_freq = 400; //Hz (Not Used)
++const float theta_update_interval = 0.0035;
  //State vector
  //[[theta(degree)], [offset of theta_dot(degree/sec)]]
  float theta_data_predict[2][1];
@@ -556,7 +566,7 @@
  //=========================================================
  //Kalman filter (for all system estimation) variables
  //State vector
-@@ -72,17 +69,25 @@
+@@ -72,17 +69,17 @@
  float P_x[4][4];
  //"A" of the state equation (update freq = 100 Hz)
  float A_x[4][4] = {
@@ -564,14 +574,10 @@
 -{4.20288e-01,1.00210e+00,0.00000e+00,7.65676e-03},
 -{-1.15751e-03,-3.87467e-06,1.00000e+00,9.74129e-03},
 -{-2.29569e-01,-1.15751e-03,0.00000e+00,9.48707e-01}
-+//{1.00210e+00,1.00070e-02,0.00000e+00,3.86060e-05},
-+//{4.20288e-01,1.00210e+00,0.00000e+00,7.65676e-03},
-+//{-1.15751e-03,-3.87467e-06,1.00000e+00,9.74129e-03},
-+//{-2.29569e-01,-1.15751e-03,0.00000e+00,9.48707e-01}
-+{1.00228403e+00, 1.00076152e-02, 0.00000000e+00, 5.00596903e-05},
-+{4.56633384e-01, 1.00228403e+00, 0.00000000e+00, 9.91639661e-03},
-+{-1.02944982e-03, -3.44810401e-06, 1.00000000e+00, 9.70509446e-03},
-+{-2.03925206e-01, -1.02944982e-03, 0.00000000e+00, 9.41602708e-01}
++{1.00447563e+00,  1.40208911e-02,  0.00000000e+00,  9.73784303e-05},
++{6.39181504e-01,  1.00447563e+00,  0.00000000e+00,  1.37291716e-02},
++{-2.00253350e-03, -9.40752945e-06,  1.00000000e+00,  1.34265323e-02},
++{-2.82332812e-01, -2.00253350e-03,  0.00000000e+00,  9.19205414e-01}
  };
  //"B" of the state equation (update freq = 100 Hz)
  float B_x[4][1] = {
@@ -579,18 +585,14 @@
 -{-5.37090e-02},
 -{1.81472e-03},
 -{3.59797e-01}
-+//{-2.70805e-04},
-+//{-5.37090e-02},
-+//{1.81472e-03},
-+//{3.59797e-01}
-+{-3.21885869e-04},
-+{-6.37628383e-02},
-+{1.89625477e-03},
-+{3.75496994e-01}
++{-0.00062615},
++{-0.08827914},
++{0.00368742},
++{0.51951251}
  };
  //"C" of the state equation (update freq = 100 Hz)
  float C_x[4][4] = {
-@@ -94,22 +99,24 @@
+@@ -94,22 +91,23 @@
  //measurement noise
  float measure_variance_mat[4][4];
  //System noise
@@ -601,8 +603,8 @@
  //=========================================================
  //Motor control variables
 -float feedback_rate = 0.01; //sec
-+float feedback_interval_sec = 0.01; //sec
-+float feedback_interval_sec_wait = 0.0086; //sec
++float feedback_interval_sec = 0.014; //sec
++float feedback_interval_sec_wait = 0.0122; //sec
  float motor_value = 0;
 -int pwm_width = 0;
 +float pwm_width = 0;
@@ -614,13 +616,12 @@
  //(R=1000, Q = diag(1, 1, 10, 10), f=100Hz)
 -float Gain[4] = {29.87522919, 4.59857246, 0.09293, 0.37006248};
 -
-+//float Gain[4] = {29.87522919, 4.59857246, 0.09293, 0.37006248};
-+float Gain[4] = {28.83829894, 4.35927862, 0.0928175, 0.36917531};
++float Gain[4] = {28.38403323,  4.29034848,  0.09009136,  0.36309152};
 + 
  //=========================================================
  // Matrix common functions
  //=========================================================
-@@ -185,9 +192,6 @@
+@@ -185,9 +183,6 @@
  //Matrix inversion (by Gaussian elimination)
  void mat_inv(float *m, float *sol, int column, int row)
  {
@@ -630,15 +631,15 @@
      //make the augmented matrix
      for(int i=0; i<column; i++)
      {
-@@ -276,104 +280,76 @@
+@@ -276,104 +271,76 @@
              sol[i*row + j] = temp[i*(2*row) + (j+row)];    
          }    
      }
 -    free(temp);
-     return;
- }
- 
- //=========================================================
+-    return;
+-}
+-
+-//=========================================================
 -// I2C common functions
 -//=========================================================
 -//i2c write function
@@ -652,9 +653,9 @@
 -    i2c.write(mem_address);
 -    i2c.write(mem_data); 
 -    i2c.stop();   
--    return;
--}
--
+     return;
+ }
+ 
 -//i2c read function
 -int i2c_mem_read(int device_address, int mem_address)
 -{   
@@ -672,7 +673,7 @@
 -    return data;
 -}
 -
--//=========================================================
+ //=========================================================
  // Accelerometer (BMX055)
  //=========================================================
  //get data
@@ -760,10 +761,10 @@
 -    //Filter bandwidth = 1000 Hz
 -    i2c_mem_write(0x19, 0x10, 0x0f);
 +{              
-+
+ 
 +    // use the "handheld device dynamic" optimal setting (see datasheet)
 +    uint8_t buf[2];
- 
++
 +    // Range=+-2g
 +    buf[0] = 0x0F;
 +    buf[1] = 0x03;
@@ -786,7 +787,7 @@
      }
      
      //calculate mean
-@@ -400,41 +376,53 @@
+@@ -400,41 +367,53 @@
  // Gyroscope (BMX055)
  //=========================================================
  //get data
@@ -866,7 +867,7 @@
      }
      
      //calculate mean
-@@ -459,28 +447,36 @@
+@@ -459,27 +438,33 @@
  
  //=========================================================
  //Rotary encoder polling function
@@ -896,28 +897,23 @@
  //=========================================================
  //Kalman filter for "theta" & "theta_dot_bias" 
 -//It takes 650 usec. (NUCLEO-F401RE 84MHz, BMX055)
-+//It takes 800 usec. (Raspberry Pi Pico, BMX055)
++//It takes 820 usec. (Raspberry Pi Pico, BMX055)
  //=========================================================
 -void update_theta()
-+bool calculatingTheta = false;
 +bool update_theta(struct repeating_timer *t)
  {     
 -    //detach the rotary encoder polling
 -    timer1.detach();
  
-+    calculatingTheta = true;
      //measurement data
      float y = get_acc_data(); //degree
-     
-@@ -535,50 +531,86 @@
+@@ -535,50 +520,84 @@
      float BUBT[2][2] = {};
      mat_mul_const(BBT[0], theta_dot_variance, BUBT[0], 2, 2);//BUB^T
      mat_add(APAT[0], BUBT[0], P_theta_predict[0], 2, 2);//APA^T+BUB^T
 -   
 -    //attach a timer for the rotary encoder (40 kHz)
 -    timer1.attach_us(&rotary_encoder_check, rotary_encoder_update_rate); 
-+
-+    calculatingTheta = false;
 +
 +    return true;
  }
@@ -1014,7 +1010,7 @@
  
      //-------------------------------------------
      //Kalman filter (angle) initialization
-@@ -666,35 +698,41 @@
+@@ -666,35 +685,34 @@
      measure_variance_mat[1][1] = theta_dot_variance * deg_rad_coeff;
      float encoder_error = 0.1f*2*3.14f/(4*rotary_encoder_resolution);
      measure_variance_mat[2][2] = encoder_error * encoder_error;
@@ -1048,16 +1044,9 @@
      //===========================================    
      while(1)
      {
-         //stop theta update process
+-        //stop theta update process
 -        timer2.detach();
 -        
-+        bool cancelled = cancel_repeating_timer(&timer);
-+        while(calculatingTheta){
-+            sleep_us(10);
-+        }
-+        if(!cancelled){
-+            printf("cancel failed\n");
-+        } 
          //turn off LEDs
 -        led1 = !led1;
 -        led_g = 0;
@@ -1066,10 +1055,11 @@
 +        gpio_put(LED_ONBOARD_PIN, led1);
 +        gpio_put(LED_R_PIN, 0);
 +        gpio_put(LED_G_PIN, 0);
++        gpio_put(LED_Y_PIN, 0);
           
          //---------------------------------------
          //Kalman Filter (all system)
-@@ -704,7 +742,7 @@
+@@ -704,7 +722,7 @@
          theta1_dot_temp = get_gyro_data();
          y[1][0] = ( theta1_dot_temp - theta_data[1][0]) * 3.14f/180;
          y[2][0] = encoder_value * (2*3.14f)/(4*rotary_encoder_resolution);
@@ -1078,7 +1068,7 @@
                  
          //calculate Kalman gain: G = P'C^T(W+CP'C^T)^-1
          mat_tran(C_x[0], tran_C_x[0], 4, 4);//C^T
-@@ -713,7 +751,7 @@
+@@ -713,7 +731,7 @@
          mat_add(G_temp1[0], measure_variance_mat[0], G_temp2[0], 4, 4);//W+CP'C^T
          mat_inv(G_temp2[0], G_temp2_inv[0], 4, 4);//(W+CP'C^T)^-1
          mat_mul(P_CT[0], G_temp2_inv[0], G[0], 4, 4, 4, 4); //P'C^T(W+CP'C^T)^-1
@@ -1087,7 +1077,7 @@
          //x_data estimation: x = x'+G(y-Cx')
          mat_mul(C_x[0], x_data_predict[0], C_x_x[0], 4, 4, 4, 1);//Cx'
          mat_sub(y[0], C_x_x[0], delta_y[0], 4, 1);//y-Cx'
-@@ -759,11 +797,11 @@
+@@ -759,11 +777,11 @@
          { 
              motor_value += Gain[i] * x_data[i][0];
          }
@@ -1101,7 +1091,7 @@
          }
          if(motor_value < 0)
          {
-@@ -771,28 +809,29 @@
+@@ -771,28 +789,29 @@
          }
          
          //calculate PWM pulse width
@@ -1141,7 +1131,7 @@
              motor_direction = 1;
          }      
          //drive the motor in reverse
-@@ -802,31 +841,32 @@
+@@ -802,31 +821,30 @@
              pwm_width = -1 * pwm_width;
  
              //over voltage
@@ -1175,9 +1165,8 @@
          
          // prepare for the next calculation of theta2_dot
          pre_theta2 = y[2][0];
-         // start the angle update process
+-        // start the angle update process
 -        timer2.attach(&update_theta, theta_update_interval);
-+        add_repeating_timer_us(-(int)(theta_update_interval*1000000), &update_theta, NULL, &timer);
          // wait 
 -        wait(feedback_rate);    
 +        //printf("%f %f\n", y[0][0]*180/3.14, y[2][0]*180/3.14);
